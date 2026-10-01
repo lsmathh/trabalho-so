@@ -1,88 +1,29 @@
-<div align="center">
+# mpmc: Múltiplos Produtores / Múltiplos Consumidores
 
-# 🔄 Múltiplos Produtores / Múltiplos Consumidores
+Trabalho Prático 02/2026 da disciplina de Sistemas Operacionais (UnB, Prof.ª Alba Melo).
 
-**Trabalho Prático 02/2026 — Sistemas Operacionais**
-
-Universidade de Brasília (UnB) · Departamento de Ciência da Computação
-Prof.ª Alba Melo
-
-![C](https://img.shields.io/badge/linguagem-C-00599C?logo=c&logoColor=white)
-![Linux](https://img.shields.io/badge/plataforma-Linux-FCC624?logo=linux&logoColor=black)
-![IPC](https://img.shields.io/badge/IPC-System%20V-6f42c1)
-
-</div>
-
----
-
-## 📑 Sumário
-
-- [Objetivo](#-objetivo)
-- [Arquitetura](#-arquitetura)
-- [Estrutura do projeto](#-estrutura-do-projeto)
-- [Compilação](#-compilação)
-- [Comandos](#-comandos)
-- [Exemplos](#-exemplos)
-- [Estruturas de dados](#-estruturas-de-dados)
-- [Limpeza de recursos IPC](#-limpeza-de-recursos-ipc)
-- [Status](#-status)
-
----
-
-## 🎯 Objetivo
-
-Desenvolver um sistema de comunicação entre processos **produtores** e
-**consumidores** utilizando mecanismos de comunicação entre processos (IPC) do
-Linux. O trabalho implementa e compara duas abordagens:
+Sistema de comunicação entre processos produtores e consumidores em C, usando IPC System V no Linux. Implementa duas abordagens:
 
 | Paradigma | Valor | Mecanismos IPC |
 |-----------|:-----:|----------------|
-| 🧠 Memória compartilhada | `1` | `shm` (memória compartilhada) + `sem` (semáforos) |
-| ✉️ Troca de mensagens   | `2` | `msg` (filas de mensagens) |
+| Memória compartilhada | `1` | `shm` + `sem` |
+| Troca de mensagens    | `2` | `msg` |
 
-Em ambos os casos, **sinais Unix** também podem ser usados. A solução deve
-coordenar a produção e o consumo de mensagens, preservar a integridade dos dados
-compartilhados e permitir configurar a quantidade de produtores.
+Sinais Unix também podem ser usados.
 
----
-
-## 🏗️ Arquitetura
-
-```mermaid
-flowchart LR
-    U([👤 Usuário]) -->|mpmc p paradigma| M[mpmc<br/>cria IPC + p produtores]
-    U -->|produz p n_msgs ack| P[produz]
-    U -->|consome p n_msgs ack| C[consome]
-    U -->|shutdown| S[shutdown]
-
-    P -->|escreve| B[(Buffers / Filas<br/>1 por produtor)]
-    B -->|lê| C
-    M -.cria.-> B
-    S -.encerra processos<br/>e remove IPC.-> B
-```
-
-Cada produtor `p` possui seu próprio buffer (memória compartilhada) ou sua
-própria fila (troca de mensagens). Consumidores escolhem de qual produtor
-querem consumir.
-
----
-
-## 📂 Estrutura do projeto
+## Estrutura
 
 ```
-trabalho-so/
+.
 ├── mpmc.c      # inicializa o sistema (IPC + produtores)
-├── produz.c    # comando para produzir mensagens
-├── consome.c   # comando para consumir mensagens
-├── utils.h     # constantes, chaves IPC e estruturas compartilhadas
-└── README.md
+├── produz.c    # produz mensagens
+├── consome.c   # consome mensagens
+└── utils.h     # constantes e definições compartilhadas
 ```
 
----
+## Build
 
-## ⚙️ Compilação
-
-Pré-requisitos: **GCC** e um sistema **Linux** com suporte a IPC System V.
+Requer GCC e Linux.
 
 ```bash
 gcc -Wall -o mpmc    mpmc.c
@@ -90,180 +31,106 @@ gcc -Wall -o produz  produz.c
 gcc -Wall -o consome consome.c
 ```
 
----
+## Uso
 
-## 🖥️ Comandos
+### mpmc
 
-### `mpmc` — inicia o sistema
+Cria os mecanismos IPC e os `p` produtores.
 
 ```bash
-./mpmc p paradigma &
+./mpmc <p> <paradigma> &
 ```
 
-| Parâmetro   | Descrição |
+| Argumento   | Descrição |
 |-------------|-----------|
-| `p`         | Número de produtores |
-| `paradigma` | `1` = memória compartilhada · `2` = troca de mensagens |
+| `p`         | número de produtores |
+| `paradigma` | `1` memória compartilhada, `2` troca de mensagens |
 
-### `produz` — envia mensagens
-
-```bash
-./produz p n_msgs ack &
-```
-
-| Parâmetro | Descrição |
-|-----------|-----------|
-| `p`       | Produtor que envia. Se `0`, as mensagens são distribuídas em **striped** (`1, 2, …, p, 1, 2, …, p`) |
-| `n_msgs`  | Número de mensagens (**1 a 1024**) |
-| `ack`     | `1` = espera confirmação de que todas foram consumidas · `2` = não espera |
-
-### `consome` — recebe mensagens
+### produz
 
 ```bash
-./consome p n_msgs ack &
+./produz <p> <n_msgs> <ack> &
 ```
 
-| Parâmetro | Descrição |
+| Argumento | Descrição |
 |-----------|-----------|
-| `p`       | Produtor do qual consumir |
-| `n_msgs`  | Número de mensagens a consumir (**1 a 1024**) |
-| `ack`     | Se houver menos mensagens que `n_msgs`: `1` = **bloqueia** · `2` = retorna **erro** informando quantas foram consumidas |
+| `p`       | produtor que envia. Com `0`, as mensagens são distribuídas no padrão striped (`1, 2, ..., p, 1, 2, ..., p`) |
+| `n_msgs`  | número de mensagens (1 a 1024) |
+| `ack`     | `1` espera confirmação de que tudo foi consumido, `2` não espera |
 
-### `shutdown` — encerra o sistema
+Se `p` não existir, retorna erro.
+
+### consome
+
+```bash
+./consome <p> <n_msgs> <ack> &
+```
+
+| Argumento | Descrição |
+|-----------|-----------|
+| `p`       | produtor de onde consumir |
+| `n_msgs`  | número de mensagens a consumir (1 a 1024) |
+| `ack`     | se faltarem mensagens: `1` bloqueia, `2` retorna erro informando quantas foram consumidas |
+
+### shutdown
 
 ```bash
 ./shutdown
 ```
 
-- ⛔ termina todos os produtores e consumidores;
-- ⏱️ imprime o **tempo de execução** de cada processo;
-- 🗑️ remove os mecanismos de comunicação (shm, sem, msg);
-- 📊 imprime o **número de mensagens consumidas**.
+Termina produtores e consumidores, imprime o tempo de execução de cada processo e o número de mensagens consumidas, e remove os mecanismos IPC.
 
----
+## Exemplos
 
-## 🧪 Exemplos
-
-<details open>
-<summary><b>1. Quatro produtores em memória compartilhada</b></summary>
+### 4 produtores, memória compartilhada
 
 ```bash
 ./mpmc 4 1 &
-./produz 3 2 1 &
-./consome 2 2 1 &
-./produz 2 5 1 &
-./shutdown
+./produz 3 2 1 &      # produz 2 msgs e bloqueia aguardando consumo
+./consome 2 2 1 &     # bloqueia até haver 2 msgs do produtor 2
+./produz 2 5 1 &      # produz 5 msgs; o consumidor consome 2
+./shutdown            # encerra com produtor ainda bloqueado
 ```
 
-1. São criados **4 produtores** com as estruturas em memória compartilhada.
-2. O produtor 3 produz 2 mensagens e **bloqueia** esperando a confirmação de consumo.
-3. O consumidor pede 2 mensagens do produtor 2 e **bloqueia** até elas existirem.
-4. O produtor 2 produz 5 mensagens e bloqueia; assim que 2 mensagens são produzidas, o consumidor as consome.
-5. A execução é finalizada com o produtor bloqueado e o total de mensagens consumidas é impresso.
-
-</details>
-
-<details>
-<summary><b>2. Dois produtores em troca de mensagens</b></summary>
+### 2 produtores, troca de mensagens
 
 ```bash
 ./mpmc 2 2 &
-./produz 3 2 1 &     # >>> retorna erro
-./consome 2 2 1 &
-./consome 2 2 1 &
-./produz 2 5 2 &
+./produz 3 2 1 &      # erro: produtor 3 não existe
+./consome 2 2 1 &     # bloqueia
+./consome 2 2 1 &     # bloqueia
+./produz 2 5 2 &      # produz 5 msgs sem bloquear; cada consumidor leva 2 e termina
 ./shutdown
 ```
 
-1. São criados **2 produtores** usando filas de mensagens.
-2. `produz 3 ...` retorna **erro**: não existe produtor 3.
-3. Dois consumidores pedem 2 mensagens cada do produtor 2 e **bloqueiam**.
-4. O produtor 2 produz 5 mensagens **sem bloquear** (`ack=2`).
-5. Cada consumidor recebe suas 2 mensagens e termina.
-6. A execução é finalizada e o total de mensagens consumidas é impresso.
-
-</details>
-
-<details>
-<summary><b>3. Cinco produtores em troca de mensagens (striped)</b></summary>
+### 5 produtores, troca de mensagens (striped)
 
 ```bash
 ./mpmc 5 2 &
-./produz 0 15 2 &
+./produz 0 15 2 &     # 15 msgs distribuídas em 5 filas (3 em cada)
 ./consome 2 3 1 &
 ./consome 1 2 1 &
-./produz 3 2 1 &
+./produz 3 2 1 &      # produz 2 msgs e bloqueia
 ./shutdown
 ```
 
-1. São criados **5 produtores** usando filas de mensagens.
-2. 15 mensagens são distribuídas em **striped** nas 5 filas (3 em cada).
-3. O primeiro consumidor pede 3 mensagens do produtor 2.
-4. O segundo consumidor pede 2 mensagens do produtor 1.
-5. O produtor 3 produz 2 mensagens e **bloqueia** aguardando confirmação.
-6. A execução é finalizada e o total de mensagens consumidas é impresso.
+## Limpeza de recursos IPC
 
-</details>
-
----
-
-## 🧱 Estruturas de dados
-
-Definidas em [`utils.h`](utils.h):
-
-| Constante  | Valor    | Significado |
-|------------|----------|-------------|
-| `MAX_PROD` | `10`     | Número máximo de produtores |
-| `MAX_MSGS` | `1024`   | Capacidade do buffer de cada produtor |
-| `SHM_KEY`  | `0x1234` | Chave da memória compartilhada |
-
-```c
-typedef struct {
-    int buf[MAX_MSGS];   // buffer circular de mensagens
-    int in;              // próxima posição de escrita
-    int out;             // próxima posição de leitura
-    int ack;             // modo de confirmação
-    int n_msgs;          // mensagens atualmente no buffer
-} Prod;
-
-typedef struct {
-    Prod prod[MAX_PROD]; // um buffer por produtor
-    int consumidas;      // total de mensagens consumidas
-    int n_prod;          // número de produtores ativos
-} Shared;
-```
-
----
-
-## 🧹 Limpeza de recursos IPC
-
-Se o programa terminar de forma inesperada, os recursos IPC podem ficar
-alocados (e `mpmc` falhará com `shmget: File exists`). Para inspecionar e
-remover:
+Se o programa morrer sem passar pelo `shutdown`, os recursos ficam alocados e o `mpmc` falha com `shmget: File exists`.
 
 ```bash
-ipcs                      # lista shm, sem e msg ativos
-ipcrm -M 0x1234           # remove a memória compartilhada pela chave
-ipcrm -a                  # remove TODOS os recursos IPC do usuário
+ipcs              # lista shm, sem e msg ativos
+ipcrm -M 0x1234   # remove a shm pela chave
+ipcrm -a          # remove todos os recursos IPC do usuário
 ```
 
----
-
-## ✅ Status
+## Status
 
 - [x] Validação de argumentos do `mpmc`
 - [x] Criação e inicialização da memória compartilhada
-- [ ] Criação dos processos produtores (`fork`)
+- [ ] Criação dos produtores (`fork`)
 - [ ] Sincronização com semáforos
-- [ ] Paradigma de troca de mensagens (`msg`)
+- [ ] Paradigma de troca de mensagens
 - [ ] `produz`
 - [ ] `consome`
 - [ ] `shutdown`
-
----
-
-<div align="center">
-
-Feito para a disciplina de **Sistemas Operacionais** — UnB 02/2026
-
-</div>
