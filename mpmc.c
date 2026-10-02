@@ -29,10 +29,10 @@
 
         switch(paradigma){
             case 1:
-                memoria_compartilhada(qtd_produtores);
+                memoria_compartilhada(qtd_produtores, paradigma);
                 break;
             case 2:
-                troca_mensagem(qtd_produtores);
+                troca_mensagem(qtd_produtores, paradigma);
                 break;
             default:
                 fprintf(stderr, "erro: paradigma deve ser 1 ou 2\n");
@@ -43,46 +43,59 @@
     }
 
 
-    void memoria_compartilhada(int qtd_produtores){
+    void memoria_compartilhada(int qtd_produtores, int paradigma){
         //declara a área de mem compartilhada
         Shared *sh;
 
+        int shmid, semid, nsems;
+
+        nsems = (qtd_produtores + 1) * NSEMS;
+
         //lista de pid dos produtores
-        pid_t produtores[MAX_PROD]; 
+        //pid_t produtores[MAX_PROD]; 
 
         //primeiro cria a area de memoria compartilhada
-        int shmid = shmget(SHM_KEY, sizeof(Shared), IPC_CREAT | IPC_EXCL | 0666);
+        shmid = shmget(KEY, sizeof(Shared), IPC_CREAT | IPC_EXCL | 0666);
         if(shmid == -1) {
             perror("shmget");
             exit(1);
         }
 
-        
+        //atribui a area de memoria compartilhada a sh
         sh = shmat(shmid, NULL, 0);
         if(sh == (void *) -1){
-            perror("shmSat");
+            perror("shmat");
             exit(1);
         }
 
         //zera as variaveis da struct Shared, inclusive as n posicoes de produtores
         memset(sh, 0, sizeof(Shared));
 
+        //precisa registrar na mem compartilhada o paradigma para os produtores e consumidores saberem qual usar
+        // tambem gravar numero de produtores que o mpmc criou
+        sh->paradigma = paradigma;
         sh->n_prod = qtd_produtores;
 
-       
+        semid = semget(KEY, nsems, IPC_CREAT | IPC_EXCL | 0666);
 
-        //trava o pai
-        pause();
+        //setar 1024 para os semaforos VAZIO de cada produtor, esse semaforo indica a qtd de campos vazios em cada buffer
+        union semun arg;
+        arg.val = 1024;
 
-       
-
+        int ctl;
+        for(int i=0; i<qtd_produtores; i++){
+            ctl = semctl(semid,  VAZIO(i), SETVAL, arg);
+            printf("setei o valor do vazio do produtor %d, retorno de semctl foi %d\n", i, ctl);
+        }
+        
     }
 
 
-    void troca_mensagem(int qtd_produtores){
+    void troca_mensagem(int qtd_produtores, int paradigma){
+        
         printf("Sou o paradigma de troca de mensagem, preciso ser implementado SOS\n");
         if(qtd_produtores > 0){
-            printf("Tenho %d produtores aguarando ansiosamente\n", qtd_produtores);
+            printf("Tenho %d %d produtores aguarando ansiosamente\n", qtd_produtores, paradigma);
         }
         
     }
