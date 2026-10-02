@@ -1,0 +1,11 @@
+# Executáveis (binários gerados a partir de cada .c)
+/consome
+/mpmc
+/produz
+
+# Artefatos de compilação
+*.o
+*.out
+*.a
+*.so
+*.d
