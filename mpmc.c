@@ -92,28 +92,13 @@ void memoria_compartilhada(int qtd_produtores, int paradigma){
 
 
 void troca_mensagem(int qtd_produtores, int paradigma){
+    // TODO: implementar o paradigma de troca de mensagens (paradigma 2)
+    //   - criar a fila de mensagens (msgget)
+    //   - produtores enviam com msgsnd, consumidor recebe com msgrcv
+    //   - respeitar qtd_produtores e o limite MAX_PROD
     printf("Sou o paradigma de troca de mensagem, preciso ser implementado SOS\n");
     if(qtd_produtores > 0){
-        printf("Tenho %d %d produtores aguarando ansiosamente\n", qtd_produtores, paradigma);
+        printf("Tenho %d %d produtores aguardando ansiosamente\n", qtd_produtores, paradigma);
     }
     
 }
-
-
-    // for(int i=1; i<=qtd_produtores; i++){
-    //     pid_t pid = fork();
-    //     if(pid == -1){
-    //         perror("erro no fork");
-    //         exit(1);
-    //     }else if(pid == 0){
-    //         produtores_loop();
-    //         exit(0);
-
-    //     }else{
-    //         produtores[i] = pid;
-    //     }
-    // }    
-
-
-        //printf("%p\n", sh);      // imprime o endereço (um número tipo 0x7f3a2000)
-    //printf("%d\n", sh->n_prod);  // vai até o endereço, acessa o campo n_prod ali dentro
