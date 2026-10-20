@@ -11,6 +11,7 @@
 #include <sys/sem.h>     // semget, semop, semctl, struct sembuf
 #include <sys/msg.h>     // msgget, msgctl (só usado se paradigma==2)
 #include <time.h>        // clock_gettime, struct timespec
+#include <sys/time.h>
 
 #include "utils.h"
 
@@ -39,56 +40,131 @@ int main(int argc, char *argv[]){
             exit(1);       
     }
 
+    //colocar aqui a logica para ficar recebendos comandos >> produz/consome/shutdown
+    // while(true){
+
+    // }
+
     return 0;
 }
 
 
 void memoria_compartilhada(int qtd_produtores, int paradigma){
-    //declara a área de mem compartilhada
-    Shared *sh;
 
-    int shmid, semid, nsems;
 
-    nsems = (qtd_produtores + 1) * NSEMS;
+    //declarações
+    Fila *sh[qtd_produtores];
+    int shmid, semid;
 
-    //lista de pid dos produtores
-    //pid_t produtores[MAX_PROD]; 
-
-    //primeiro cria a area de memoria compartilhada
-    shmid = shmget(KEY, sizeof(Shared), IPC_CREAT | IPC_EXCL | 0666);
-    if(shmid == -1) {
-        perror("shmget");
-        exit(1);
-    }
-
-    //atribui a area de memoria compartilhada a sh
-    sh = shmat(shmid, NULL, 0);
-    if(sh == (void *) -1){
-        perror("shmat");
-        exit(1);
-    }
-
-    //zera as variaveis da struct Shared, inclusive as n posicoes de produtores
-    memset(sh, 0, sizeof(Shared));
-
-    //precisa registrar na mem compartilhada o paradigma para os produtores e consumidores saberem qual usar
-    // tambem gravar numero de produtores que o mpmc criou
-    sh->paradigma = paradigma;
-    sh->n_prod = qtd_produtores;
-
-    semid = semget(KEY, nsems, IPC_CREAT | IPC_EXCL | 0666);
-
-    //setar 1024 para os semaforos VAZIO de cada produtor, esse semaforo indica a qtd de campos vazios em cada buffer
-    union semun arg;
-    arg.val = 1024;
-
-    int ctl;
+    //cria segmento e semaforos para cada produtor
     for(int i=0; i<qtd_produtores; i++){
-        ctl = semctl(semid,  VAZIO(i), SETVAL, arg);
-        printf("setei o valor do vazio do produtor %d, retorno de semctl foi %d\n", i, ctl);
+
+        //cria os semáforos
+        semid = semget(KEY+i, NSEMS, IPC_CREAT | IPC_EXCL | 0666);
+        if(semid == -1) {
+            perror("semget");
+            exit(1);
+        }
+
+        //cria os segmentos
+        shmid = shmget(KEY+i, sizeof(Fila), IPC_CREAT | IPC_EXCL | 0666);
+        printf("Eu sou o i: %d e meu shmid é: %d\n", i, shmid);
+        if(shmid == -1) {
+            perror("shmget");
+            exit(1);
+        }
+        
+        //faz o attach pra cada fila[i]
+        sh[i] = shmat(shmid, NULL, 0);
+        if(sh == (void *) -1){
+            perror("shmat");
+            exit(1);
+        }
+
+        //zera as variaveis da fila
+        memset(sh[i], 0, sizeof(Fila));
+
+        //setar 1024 para os semaforos VAZIO de cada produtor, esse semaforo indica a qtd de campos vazios em cada buffer
+        union semun arg;
+        arg.val = 1024;
+        semctl(semid,  VAZIO(i), SETVAL, arg);        
     }
     
+    char linha[100];
+    char acao[10];
+    int produtor, num_msgs, ack, pid;
+    int loop = 1;
+
+    //TODO se produtor == 0, falta implementar logica para distribuir mensagens
+    while(loop){
+        
+        printf(">> ");
+        fflush(stdout);
+
+
+        if (fgets(linha, sizeof(linha), stdin) == NULL) continue;
+
+        if (sscanf(linha, "%9s", acao) == 1 && strcmp(acao, "shutdown") == 0){
+            //printf("Encerrando o programa de forma limpa...\n");
+
+            for(int i=0; i<sh[produtor-1]->in; i++){
+                printf("pid da msg[%d]: %d\n", i, sh[produtor-1]->msg[i].pid);
+                printf("seq da msg[%d]: %d\n", i, sh[produtor-1]->msg[i].seq);
+                printf("tempo da msg[%d]: %ld\n", i, sh[produtor-1]->msg[i].tempo);
+            }
+           
+
+            printf("in: %d\n", sh[produtor-1]->in);
+            printf("out: %d\n", sh[produtor-1]->out);
+
+
+
+            
+            continue;
+            //shutdown_func();
+        }
+
+        int lidos = sscanf(linha, "%9s %d %d %d", acao, &produtor, &num_msgs, &ack);
+        if (lidos == 4){
+            if (strcmp(acao, "produz") == 0) {
+                if ((pid = fork()) == 0){
+
+                    struct timeval inicio, fim;
+                    gettimeofday(&inicio, NULL);
+ 
+                    produz_func(produtor, num_msgs, ack);
+
+
+                    gettimeofday(&fim, NULL);
+                    // double tempo = (double)(fim.tv_sec - inicio.tv_sec) + 
+                    //             (double)(fim.tv_usec - inicio.tv_usec) / 1000000.0;
+
+                    exit(0);
+                }
+            } 
+            else if (strcmp(acao, "consome") == 0) {
+                if ((pid = fork()) == 0){
+
+                    struct timeval inicio, fim;
+                    gettimeofday(&inicio, NULL);
+
+
+                    consome_func(produtor, num_msgs, ack);
+
+
+                    gettimeofday(&fim, NULL);
+                    // double tempo = (double)(fim.tv_sec - inicio.tv_sec) + 
+                    //             (double)(fim.tv_usec - inicio.tv_usec) / 1000000.0;
+
+                    exit(0);
+                }
+            }
+        }else{
+            printf("Erro: Use 'produz p n_msgs ack', 'consome p n_msgs ack' ou 'shutdown'\n");
+        }
+    }
 }
+    
 
 
 void troca_mensagem(int qtd_produtores, int paradigma){
@@ -101,4 +177,80 @@ void troca_mensagem(int qtd_produtores, int paradigma){
         printf("Tenho %d %d produtores aguardando ansiosamente\n", qtd_produtores, paradigma);
     }
     
+}
+
+
+void produz_func(int produtor, int n_msgs, int ack){
+
+    //TODO implementar padrão stripped
+    Fila *sh = busca_fila(produtor);
+    int sequencial = 0;
+
+
+    for(int i=0; i < n_msgs; i++){
+
+        //TODO semaforos
+        //logica de semaforos aqui
+
+
+        sh->msg[sh->in].pid = getpid();
+        sh->msg[sh->in].seq = ++sequencial;
+        sh->msg[sh->in].tempo = time(NULL);
+        sh->in = (sh->in + 1) % MAX_MSGS;
+
+        //logica de semaforos aqui
+    }
+
+    shmdt(sh);
+
+    exit(0);
+}
+
+void consome_func(int produtor, int n_msgs, int ack){
+    Fila *sh = busca_fila(produtor);
+    int sequencial = 0;
+
+
+    for(int i=0; i < n_msgs; i++){
+        //TODO semaforos
+        //logica de semaforos aqui
+
+        sh->out = (sh->out + 1) % MAX_MSGS;
+
+        //logica de semaforos aqui
+    }
+
+    shmdt(sh);
+
+    exit(0);
+}
+
+void shutdown_func(){
+    printf("encerrando programa\n");
+    //como pegar o tempo de cada processo?
+    exit(0);
+
+}
+
+Fila *busca_fila(int produtor){
+    Fila *sh;
+    int prod = produtor-1;
+    int shmid;
+
+
+    shmid = shmget(KEY+prod, sizeof(Fila), 0666);
+    if(shmid == -1) {
+        perror("shmget");
+        exit(1);
+    }
+        
+
+    //atribui a area de memoria compartilhada a sh
+    sh = (Fila *) shmat(shmid, NULL, 0);
+    if(sh == (void *) -1){
+        perror("shmat");
+        exit(1);
+    }
+
+    return sh;
 }
