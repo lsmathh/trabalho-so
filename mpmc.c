@@ -70,7 +70,7 @@ void memoria_compartilhada(int qtd_produtores, int paradigma){
         shmid = shmget(KEY+i, sizeof(Fila), IPC_CREAT | IPC_EXCL | 0666);
         printf("Eu sou o i: %d e meu shmid é: %d\n", i, shmid);
         if(shmid == -1) {
-            perror("shmget");
+            perror("shmget inicial");
             exit(1);
         }
         
@@ -83,11 +83,18 @@ void memoria_compartilhada(int qtd_produtores, int paradigma){
 
         //zera as variaveis da fila
         memset(sh[i], 0, sizeof(Fila));
-
-        //setar 1024 para os semaforos VAZIO de cada produtor, esse semaforo indica a qtd de campos vazios em cada buffer
+   
+        
+        //MUTEX começa livre; CHEIO e ACK começam em zero
+        unsigned short valores[NSEMS] = {0};
+        valores[MUTEX] = 1;
+        valores[VAZIO] = MAX_MSGS;
         union semun arg;
-        arg.val = 1024;
-        semctl(semid,  VAZIO(i), SETVAL, arg);        
+        arg.array = valores;
+        if (semctl(semid, 0, SETALL, arg) == -1) {
+            perror("semctl SETALL");
+            exit(1);
+        }
     }
     
     char linha[100];
@@ -184,40 +191,70 @@ void produz_func(int produtor, int n_msgs, int ack){
 
     //TODO implementar padrão stripped
     Fila *sh = busca_fila(produtor);
+    int semid = busca_semaforo(produtor);
+    
+
     int sequencial = 0;
-
-
+    int sem_ack = -1;
+    if (ack == 1) sem_ack = cria_semaforo_ack();
+    
+    
     for(int i=0; i < n_msgs; i++){
 
-        //TODO semaforos
-        //logica de semaforos aqui
-
-
+        p(semid, VAZIO);
+        p(semid, MUTEX);
+        
         sh->msg[sh->in].pid = getpid();
         sh->msg[sh->in].seq = ++sequencial;
         sh->msg[sh->in].tempo = time(NULL);
+        sh->sem_ack[sh->in] = sem_ack;
         sh->in = (sh->in + 1) % MAX_MSGS;
 
-        //logica de semaforos aqui
+        v(semid, MUTEX);
+        v(semid, CHEIO);
+    }
+
+
+    if (ack == 1) {
+        printf("PID[%d] esperando confirmação de leitura\n", getpid());
+        for (int i = 0; i < n_msgs; i++) {
+            p(sem_ack, 0);
+
+        }
+
+        printf("PID[%d] recebeu a confirmação de leitura\n", getpid());
+        if (semctl(sem_ack, 0, IPC_RMID) == -1) {
+            perror("semctl IPC_RMID ACK");
+            exit(1);
+        }
     }
 
     shmdt(sh);
-
-    exit(0);
 }
 
 void consome_func(int produtor, int n_msgs, int ack){
     Fila *sh = busca_fila(produtor);
+    int semid = busca_semaforo(produtor);
     int sequencial = 0;
 
 
     for(int i=0; i < n_msgs; i++){
-        //TODO semaforos
-        //logica de semaforos aqui
 
+        
+        p(semid, CHEIO);
+        p(semid, MUTEX);
+
+        Msg mensagem = sh->msg[sh->out];
+        int destino_ack = sh->sem_ack[sh->out];
         sh->out = (sh->out + 1) % MAX_MSGS;
 
-        //logica de semaforos aqui
+        v(semid, MUTEX);
+        v(semid, VAZIO);
+        
+        printf("PID[%d] lendo mensagem %d/%d\n", getpid(), sh->out, n_msgs);
+        if (destino_ack != -1) {
+            v(destino_ack, 0);
+        }
     }
 
     shmdt(sh);
@@ -240,7 +277,7 @@ Fila *busca_fila(int produtor){
 
     shmid = shmget(KEY+prod, sizeof(Fila), 0666);
     if(shmid == -1) {
-        perror("shmget");
+        perror("shmget busca");
         exit(1);
     }
         
@@ -248,9 +285,43 @@ Fila *busca_fila(int produtor){
     //atribui a area de memoria compartilhada a sh
     sh = (Fila *) shmat(shmid, NULL, 0);
     if(sh == (void *) -1){
-        perror("shmat");
+        perror("shmat busca");
         exit(1);
     }
 
     return sh;
 }
+int cria_semaforo_ack(){
+    int semid;
+
+    //cria os semáforos
+    semid = semget(IPC_PRIVATE, 1, 0666);
+    if(semid == -1) {
+        perror("semget ack");
+        exit(1);
+    }
+
+    union semun arg;
+    arg.val = 0;
+    if (semctl(semid, 0, SETVAL, arg) == -1) {
+            perror("semctl SETVAL");
+            exit(1);
+        }
+
+    return semid;
+}
+
+int busca_semaforo(int produtor){
+    int semid;
+    int prod = produtor-1;
+
+    //cria os semáforos
+    semid = semget(KEY+prod, NSEMS, 0666);
+    if(semid == -1) {
+        perror("semget busca");
+        exit(1);
+    }
+
+    return semid;
+}
+

@@ -1,15 +1,19 @@
 #ifndef UTILS_H
 #define UTILS_H
+
+#include <sys/types.h>
+#include <time.h>
+
 #define MAX_PROD 10
 #define MAX_MSGS 1024
 #define TAM_SEG 2048
 #define KEY 0X1234
 #define NSEMS 4
 
-#define MUTEX(i) (0)
-#define VAZIO(i) (1)
-#define CHEIO(i) (2)
-#define ACK(i)   (3)
+#define MUTEX 0
+#define VAZIO 1
+#define CHEIO 2
+#define ACK 3
 
 typedef struct{
     pid_t pid;
@@ -19,6 +23,7 @@ typedef struct{
 
 typedef struct{
     Msg msg[MAX_MSGS];
+    int sem_ack[MAX_MSGS];
     int in;
     int out;
     int consumidas;
@@ -41,6 +46,8 @@ void shutdown_func();
 void troca_mensagem(int qtd_produtores, int paradigma);
 void p(int semid, int idx);
 void v(int semid, int idx);
+int busca_semaforo(int produtor);
+int cria_semaforo_ack(void);
 
 
 #endif
