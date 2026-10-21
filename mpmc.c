@@ -236,8 +236,11 @@ void consome_func(int produtor, int n_msgs, int ack){
     Fila *sh = busca_fila(produtor);
     int semid = busca_semaforo(produtor);
     int sequencial = 0;
-
-
+    int sem_ack = -1;
+    if (ack == 1) sem_ack = cria_semaforo_ack();
+    
+    //TODO ack do consumidor
+    
     for(int i=0; i < n_msgs; i++){
 
         
@@ -258,8 +261,6 @@ void consome_func(int produtor, int n_msgs, int ack){
     }
 
     shmdt(sh);
-
-    exit(0);
 }
 
 void shutdown_func(){
