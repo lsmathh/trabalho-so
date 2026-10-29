@@ -1,9 +1,9 @@
 #include "utils.h"
+
 #include <sys/sem.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-
 
 void p(int semid, int idx){
     struct sembuf op;
@@ -31,4 +31,22 @@ void v(int semid, int idx){
         perror("semop V");
         exit(1);
     }
+}
+
+int tenta_consumir(int semid, int idx) {
+    struct sembuf op;
+
+        op.sem_num = idx;
+        op.sem_op = -1;
+        op.sem_flg = IPC_NOWAIT;
+
+    while (semop(semid, &op, 1) == -1) {
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN) return 0;
+
+        perror("semop tenta_consumir");
+        exit(EXIT_FAILURE);
+    }
+
+    return 1;
 }

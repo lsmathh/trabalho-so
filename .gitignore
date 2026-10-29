@@ -2,6 +2,7 @@
 /consome
 /mpmc
 /produz
+/tests/test_mpmc
 
 # Artefatos de compilação
 *.o
