@@ -9,6 +9,8 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/msg.h>
+#include <sys/time.h>
 
 #include "utils.h"
 
@@ -287,6 +289,35 @@ int remove_segmento(Fila *fila, int shmid){
     return erro;
 }
 
+int cria_fila(void) {
+    int id = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
+    if (id == -1) perror("msgget");
+    return id;
+}
+
+int remove_fila(int id){
+    if (id == -1) return 0;
+    if (msgctl(id, IPC_RMID, NULL) == -1 && errno != EINVAL && errno != EIDRM) {
+        perror("msgctl IPC_RMID");
+        return -1;
+    }
+    return 0;
+
+}
+
+int imprime_relatorios(int fila_rel) {
+    MsgRelatorio rel;
+    int total = 0;
+
+    while (msgrcv(fila_rel, &rel, TAM(MsgRelatorio), TIPO_RELATORIO, IPC_NOWAIT) != -1) {
+        printf("PID[%d] %s: %.3f s\n", rel.pid, rel.papel == PRODUTOR ? "produtor" : "consumidor", rel.segundos);
+        total += rel.consumidas;
+    }
+
+    if (errno != ENOMSG) perror("msgrcv relatorio");
+    return total;
+}
+
 // obs: utilizar so se tiver o mutex adquirido dentro de consome ou produz
 //essa funcao valida se in e out tem escopo aceito (devido ao tamanho de 2048, apenas é possivel 101 mensagens em cada segmento)
 int indices_validos(const Fila *fila){
@@ -362,10 +393,144 @@ int busca_semaforo(int produtor){
 }
 
 void troca_mensagem(int qtd_produtores, int paradigma) {
-    (void) qtd_produtores;
     (void) paradigma;
-    printf("Paradigma de troca de mensagens ainda nao implementado\n");
+    struct timeval inicio_mpmc;
+    gettimeofday(&inicio_mpmc, NULL);
+
+    if(qtd_produtores < 1 || qtd_produtores > MAX_PROD) {
+        fprintf(stderr, "Erro: quantidade de produtores deve ser de 1 a %d\n", MAX_PROD);
+        exit(EXIT_FAILURE);
+
+    }
+
+    int filas[qtd_produtores];
+    for (int i =0; i < qtd_produtores; i++) filas[i] = -1;
+    int fila_ack = -1, fila_rel = -1;
+
+    int erro = 0;
+    for (int i = 0; i < qtd_produtores; i++) {
+        filas[i] = cria_fila();
+        if (filas[i] == -1) { erro = 1; break; }
+    }
+    if(!erro) {
+        fila_ack = cria_fila();
+        if (fila_ack == -1) erro = 1;
+    }
+    if(!erro) {
+        fila_rel = cria_fila();
+        if (fila_rel == -1) erro = 1;
+    }
+    if (erro) {
+        for (int i = 0; i < qtd_produtores; i ++) remove_fila(filas[i]);
+        remove_fila(fila_ack);
+        remove_fila(fila_rel);
+        exit(EXIT_FAILURE);
+    }
+
+    char linha[100];
+    char acao[10];
+    int produtor, num_msgs, ack;
+    pid_t *pids = NULL;
+    int qtd_filhos = 0;
+
+    while(1) {
+        // recolhe os filhos que já terminaram, sem esperar pelos outros
+        pid_t terminado;
+        while((terminado = waitpid(-1, NULL, WNOHANG)) > 0) {
+            for (int i = 0; i < qtd_filhos; i++) {
+                if(pids[i] == terminado) {
+                    pids[i] = -1;
+                    break;
+                }
+            }
+        }
+        printf(">> ");
+        fflush(stdout);
+        if (fgets(linha, sizeof(linha), stdin) == NULL) break;
+    
+        if (sscanf(linha, "%9s", acao) == 1 && strcmp(acao, "shutdown") == 0) {
+            break;
+        }
+    
+        if (sscanf(linha, "%9s %d %d %d", acao, &produtor, &num_msgs, &ack) != 4) {
+            fprintf(stderr, "Erro: use produz p n_msgs ack, consome p n_msgs ack ou shutdown\n");
+            continue;
+        }
+        if(strcmp(acao, "produz") != 0 && strcmp(acao, "consome") != 0) {
+            fprintf(stderr, "Erro: comando '%s' desconhecido\n", acao);
+            continue;
+        }
+    
+        if(produtor > qtd_produtores) {
+            fprintf(stderr, "Erro: fila %d nao existe\n", produtor);
+            continue;
+        }
+    
+        if (produtor < 0 || (produtor == 0 && strcmp(acao, "consome") == 0) || num_msgs < 1 || num_msgs > 1024 || (ack != 1 && ack != 2)) {
+            fprintf(stderr, "Erro: produtor, quantidade de mensagens ou ack invalidos\n");
+            continue;
+        }
+    
+        pid_t *novos_pids = realloc(pids, (qtd_filhos + 1) * sizeof(*pids));
+        if (novos_pids == NULL) { perror("realloc pids"); erro = 1; break;}
+        pids = novos_pids;
+    
+        fflush(NULL);
+        pid_t pid = fork();
+        if (pid == -1) {
+            perror("fork");
+            continue;
+        }
+        if (pid == 0) {
+            if (strcmp(acao, "produz") == 0) {
+                exit(produz_msg(filas, qtd_produtores, produtor, num_msgs, ack, fila_ack, fila_rel));
+            }else {
+                consome_msg(filas, qtd_produtores, produtor, num_msgs, ack, fila_ack, fila_rel);
+                exit(EXIT_SUCCESS);
+            }
+        }
+    
+        pids[qtd_filhos] = pid;
+        qtd_filhos++;
+    }
+    // encerra todos antes de esperar, inclusive os bloqueados nas filas
+    for (int i = 0; i < qtd_filhos; i++) {
+        if (pids[i] > 0 && kill(pids[i], SIGTERM) == -1 && errno != ESRCH) {
+            perror("kill");
+            erro = 1;
+        }
+    }
+    for (int i = 0; i < qtd_filhos; i++) {
+        if (pids[i] > 0) {
+            pid_t resultado;
+            do {
+                resultado = waitpid(pids[i], NULL, 0);
+            } while (resultado == -1 && errno == EINTR);
+            if (resultado == -1) {perror("waitpid"); erro = 1; }
+        }
+    }
+
+    //todos os filhos terminaram, entao todos os relatorios ja estao na fila
+    int total = imprime_relatorios(fila_rel);
+    
+    for (int i = 0; i < qtd_produtores; i ++) {
+        if(remove_fila(filas[i]) == -1) erro = 1;
+    }
+
+    if(remove_fila(fila_ack) == -1) erro = 1;
+    if(remove_fila(fila_rel) == -1) erro = 1;
+    free(pids);
+
+    struct timeval fim_mpmc;
+    gettimeofday(&fim_mpmc, NULL);
+    double segundos = (fim_mpmc.tv_sec - inicio_mpmc.tv_sec) + (fim_mpmc.tv_usec - inicio_mpmc.tv_usec) / 1000000.0;
+    printf("Total de mensagens consumidas: %d\n", total);
+    printf("Tempo de operacao do mpmc: %.3f s\n", segundos);
+
+    if (erro) exit(EXIT_FAILURE);
+
 }
+
 
 /* TODO completar o que falta do PDF
  * - medir o tempo de cada produtor, consumidor e mpmc e guardar até o shutdown

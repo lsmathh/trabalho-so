@@ -31,7 +31,7 @@ typedef struct{
     time_t duracao;
 } Fila;
 
-#define TIPO_DATO 1
+#define TIPO_DADO 1
 #define TIPO_RELATORIO 1
 #define PRODUTOR 1 
 #define CONSUMIDOR 2
