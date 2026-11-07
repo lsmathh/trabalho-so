@@ -531,6 +531,160 @@ void troca_mensagem(int qtd_produtores, int paradigma) {
 
 }
 
+int produz_msg(int filas[], int qtd_produtores, int produtor, int n_msgs,
+               int ack, int fila_ack, int fila_rel) {
+    (void) fila_rel;
+
+    if (qtd_produtores < 1 || qtd_produtores > MAX_PROD ||
+        produtor < 0 || produtor > qtd_produtores) {
+        fprintf(stderr, "Erro: fila/produtor %d nao existe\n", produtor);
+        return EXIT_FAILURE;
+    }
+
+    if (n_msgs < 1 || n_msgs > 1024 || (ack != 1 && ack != 2)) {
+        fprintf(stderr, "Erro: quantidade de mensagens ou ack invalidos\n");
+        return EXIT_FAILURE;
+    }
+
+    if (ack == 1 && fila_ack == -1) {
+        fprintf(stderr, "Erro: fila de confirmacoes indisponivel\n");
+        return EXIT_FAILURE;
+    }
+
+    const pid_t pid_produtor = getpid();
+
+    /*
+     * produtor == 0: padrão striped
+     * produtor > 0: todas as mensagens vão pra fila
+     */
+    for (int i = 0; i < n_msgs; i++) {
+        int indice_fila = (produtor == 0)
+                            ? (i % qtd_produtores)
+                            : (produtor - 1);
+
+        if (filas[indice_fila] == -1) {
+            fprintf(stderr, "Erro: fila %d indisponivel\n", indice_fila + 1);
+            return EXIT_FAILURE;
+        }
+
+        MsgDados mensagem = {0};
+        mensagem.mtype = TIPO_DADO;
+        mensagem.dados.pid = pid_produtor;
+        mensagem.dados.seq = i + 1;
+        mensagem.dados.tempo = time(NULL);
+        mensagem.pede_ack = (ack == 1);
+
+        int resultado;
+        do {
+            resultado = msgsnd(filas[indice_fila], &mensagem, TAM(MsgDados), 0);
+        } while (resultado == -1 && errno == EINTR);
+
+        if (resultado == -1) {
+            perror("msgsnd dados");
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* ACK=1: todas as mensagens já foram enviadas */
+    if (ack == 1) {
+        int confirmadas[1025] = {0};
+        int total_confirmadas = 0;
+
+        while (total_confirmadas < n_msgs) {
+            MsgAck confirmacao = {0};
+            ssize_t resultado;
+
+            do {
+                resultado = msgrcv(fila_ack, &confirmacao, TAM(MsgAck),
+                                   (long) pid_produtor, 0);
+            } while (resultado == -1 && errno == EINTR);
+
+            if (resultado == -1) {
+                perror("msgrcv ack");
+                return EXIT_FAILURE;
+            }
+
+            if (confirmacao.seq >= 1 && confirmacao.seq <= n_msgs &&
+                !confirmadas[confirmacao.seq]) {
+                confirmadas[confirmacao.seq] = 1;
+                total_confirmadas++;
+            }
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
+void consome_msg(int filas[], int qtd_produtores, int produtor, int n_msgs,
+                 int ack, int fila_ack, int fila_rel) {
+    (void) fila_rel;
+
+    if (qtd_produtores < 1 || qtd_produtores > MAX_PROD ||
+        produtor < 1 || produtor > qtd_produtores) {
+        fprintf(stderr, "Erro: fila %d nao existe\n", produtor);
+        exit(EXIT_FAILURE);
+    }
+
+    if (n_msgs < 1 || n_msgs > 1024 || (ack != 1 && ack != 2)) {
+        fprintf(stderr, "Erro: quantidade de mensagens ou ack invalidos\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int indice_fila = produtor - 1;
+    if (filas[indice_fila] == -1) {
+        fprintf(stderr, "Erro: fila %d indisponivel\n", produtor);
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < n_msgs; i++) {
+        MsgDados mensagem = {0};
+        ssize_t resultado;
+
+        /*
+         * ACK=1: msgrcv bloqueia até aparecer uma mensagem
+         * ACK=2: IPC_NOWAIT faz a chamada retornar imediatamente com ENOMSG
+         */
+        int flags = (ack == 2) ? IPC_NOWAIT : 0;
+        do {
+            resultado = msgrcv(filas[indice_fila], &mensagem, TAM(MsgDados),
+                               TIPO_DADO, flags);
+        } while (resultado == -1 && errno == EINTR);
+
+        if (resultado == -1) {
+            if (ack == 2 && errno == ENOMSG) {
+                fprintf(stderr,
+                        "Erro ao consumir: fila %d sem mensagens disponiveis; "
+                        "consumidas %d de %d mensagens solicitadas\n",
+                        produtor, i, n_msgs);
+            } else {
+                perror("msgrcv dados");
+            }
+            exit(EXIT_FAILURE);
+        }
+
+        if (mensagem.pede_ack) {
+            if (fila_ack == -1 || mensagem.dados.pid <= 0) {
+                fprintf(stderr, "Erro: dados invalidos para envio do ACK\n");
+                exit(EXIT_FAILURE);
+            }
+
+            MsgAck confirmacao = {0};
+            confirmacao.mtype = (long) mensagem.dados.pid;
+            confirmacao.seq = mensagem.dados.seq;
+
+            int envio;
+            do {
+                envio = msgsnd(fila_ack, &confirmacao, TAM(MsgAck), 0);
+            } while (envio == -1 && errno == EINTR);
+
+            if (envio == -1) {
+                perror("msgsnd ack");
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+}
+
 
 /* TODO completar o que falta do PDF
  * - medir o tempo de cada produtor, consumidor e mpmc e guardar até o shutdown
