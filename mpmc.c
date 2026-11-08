@@ -305,16 +305,21 @@ int remove_fila(int id){
 
 }
 
-int imprime_relatorios(int fila_rel) {
+int imprime_relatorios(int fila_rel, int qtd_produtores) {
     MsgRelatorio rel;
     int total = 0;
+    int por_fila[MAX_PROD + 1] = {0};
 
     while (msgrcv(fila_rel, &rel, TAM(MsgRelatorio), TIPO_RELATORIO, IPC_NOWAIT) != -1) {
         printf("PID[%d] %s: %.3f s\n", rel.pid, rel.papel == PRODUTOR ? "produtor" : "consumidor", rel.segundos);
         total += rel.consumidas;
+        if (rel.fila >= 1 && rel.fila <= qtd_produtores) por_fila[rel.fila] += rel.consumidas;
     }
 
     if (errno != ENOMSG) perror("msgrcv relatorio");
+
+    for (int p = 1; p <= qtd_produtores; p++)
+        printf("Fila %d: %d mensagens consumidas\n", p, por_fila[p]);
     return total;
 }
 
@@ -482,6 +487,10 @@ void troca_mensagem(int qtd_produtores, int paradigma) {
             continue;
         }
         if (pid == 0) {
+            struct timeval inicio;
+            gettimeofday(&inicio, NULL);
+            int papel = (strcmp(acao, "produz") == 0) ? PRODUTOR : CONSUMIDOR;
+            prepara_termino(fila_rel, papel, (papel == CONSUMIDOR) ? produtor : 0, inicio);
             if (strcmp(acao, "produz") == 0) {
                 exit(produz_msg(filas, qtd_produtores, produtor, num_msgs, ack, fila_ack, fila_rel));
             }else {
@@ -511,7 +520,7 @@ void troca_mensagem(int qtd_produtores, int paradigma) {
     }
 
     //todos os filhos terminaram, entao todos os relatorios ja estao na fila
-    int total = imprime_relatorios(fila_rel);
+    int total = imprime_relatorios(fila_rel, qtd_produtores);
     
     for (int i = 0; i < qtd_produtores; i ++) {
         if(remove_fila(filas[i]) == -1) erro = 1;
@@ -661,6 +670,8 @@ void consome_msg(int filas[], int qtd_produtores, int produtor, int n_msgs,
             }
             exit(EXIT_FAILURE);
         }
+
+        consumidas_atual++;
 
         if (mensagem.pede_ack) {
             if (fila_ack == -1 || mensagem.dados.pid <= 0) {
