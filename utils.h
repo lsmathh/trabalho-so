@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include  <sys/time.h>
+#include <signal.h>
 
 #define MAX_PROD 10
 #define MAX_MSGS 101 // pra caber em 2048 bytes
@@ -51,6 +52,7 @@ typedef struct {
     long mtype;
     pid_t pid;
     int papel;
+    int fila;
     int consumidas;
     double segundos;
 } MsgRelatorio;
@@ -86,10 +88,11 @@ int indices_validos(const Fila *fila);
 
 int cria_fila(void);
 int remove_fila(int id);
-int imprime_relatorios(int fila_rel);
+int imprime_relatorios(int fila_rel, int qtd_produtores);
 int produz_msg(int filas[], int qtd_produtores, int produtor, int n_msgs, int ack, int fila_ack, int fila_rel);
 void consome_msg(int filas[], int qtd_produtores, int produtor, int n_msgs, int ack, int fila_ack, int fila_rel);
-void prepara_termino(void);
-void envia_relatorio(int fila_rel, int papel, int consumidas, struct timeval inicio);
+extern volatile sig_atomic_t consumidas_atual;
+void prepara_termino(int fila_rel, int papel, int fila, struct timeval inicio);
+void envia_relatorio(int fila_rel, int papel, int fila, int consumidas, struct timeval inicio);
 
 #endif
