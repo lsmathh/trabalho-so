@@ -10,7 +10,7 @@ all: mpmc
 mpmc: $(FONTES) $(CABECALHOS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(FONTES) $(LDLIBS) -o $@
 
-# testes unitarios da troca de mensagens: o main do mpmc.c e renomeado
+# testes unitarios (memoria compartilhada e troca de mensagens): o main do mpmc.c e renomeado
 # para que o programa de teste tenha o seu proprio main
 teste: tests/test_mpmc.c $(FONTES) $(CABECALHOS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Dmain=mpmc_main -c mpmc.c -o tests/mpmc_teste.o

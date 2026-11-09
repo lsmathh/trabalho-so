@@ -1,5 +1,5 @@
 /*
- * Testes unitarios da troca de mensagens (paradigma 2).
+ * Testes unitarios do mpmc: memoria compartilhada (paradigma 1) e troca de mensagens (paradigma 2).
  *
  * Cada teste segue o roteiro: prepara as filas -> executa a funcao -> confere -> limpa.
  * O main do mpmc.c e renomeado na compilacao (-Dmain=mpmc_main), entao aqui
@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
+#include <sys/shm.h>
+#include <sys/sem.h>
 #include <sys/wait.h>
 #include <sys/time.h>
 
@@ -352,8 +354,325 @@ static void teste_relatorio_no_sigterm(void) {
     remove_filas(&f);
 }
 
+/* ======================== MEMORIA COMPARTILHADA ========================= */
+
+// as filas do paradigma 1 usam chave fixa (KEY + i): nao rode o mpmc ao mesmo tempo que os testes
+typedef struct {
+    Fila *sh[QTD_FILAS];
+    int shmids[QTD_FILAS];
+    int semids[QTD_FILAS];
+} Segmentos;
+
+static Segmentos cria_segmentos(void) {
+    Segmentos s;
+    for (int i = 0; i < QTD_FILAS; i++) {
+        s.semids[i] = cria_semaforo_fila(i);
+        s.shmids[i] = cria_segmento(i);
+        s.sh[i] = (s.shmids[i] == -1) ? NULL : anexa_segmento(s.shmids[i]);
+    }
+    return s;
+}
+
+static void remove_segmentos(Segmentos *s) {
+    for (int i = 0; i < QTD_FILAS; i++) {
+        remove_segmento(s->sh[i], s->shmids[i]);
+        remove_semaforo(s->semids[i]);
+    }
+}
+
+static int recursos_ok(Segmentos *s) {
+    for (int i = 0; i < QTD_FILAS; i++)
+        if (s->semids[i] == -1 || s->shmids[i] == -1 || s->sh[i] == NULL) return 0;
+    return 1;
+}
+
+static int valor_sem(int semid, int idx) {
+    return semctl(semid, idx, GETVAL);
+}
+
+// quantas mensagens estao esperando na fila (o semaforo CHEIO conta isso)
+static int mensagens_no_segmento(Segmentos *s, int i) {
+    return valor_sem(s->semids[i], CHEIO);
+}
+
+static void teste_shm_criacao(void) {
+    inicio_teste("cria_semaforo_fila, cria_segmento e anexa_segmento (mensagem de erro esperada)");
+    Segmentos s = cria_segmentos();
+    CONFERE(recursos_ok(&s), "os 3 segmentos e os 3 conjuntos de semaforos foram criados");
+    if (!recursos_ok(&s)) {
+        printf("    (rode ipcrm -a e tente de novo: sobraram recursos de outra execucao)\n");
+        remove_segmentos(&s);
+        return;
+    }
+
+    for (int i = 0; i < QTD_FILAS; i++) {
+        CONFERE(valor_sem(s.semids[i], MUTEX) == 1, "MUTEX comeca em 1");
+        CONFERE(valor_sem(s.semids[i], VAZIO) == MAX_MSGS, "VAZIO comeca em 101");
+        CONFERE(valor_sem(s.semids[i], CHEIO) == 0, "CHEIO comeca em 0");
+        CONFERE(s.sh[i]->in == 0 && s.sh[i]->out == 0 && s.sh[i]->consumidas == 0,
+                "o segmento comeca zerado (in, out e consumidas)");
+        CONFERE(busca_semaforo(i) == s.semids[i], "busca_semaforo encontra o mesmo conjunto pela chave");
+    }
+
+    int repetido = cria_semaforo_fila(0);
+    CONFERE(repetido == -1, "criar de novo com a mesma chave falha (IPC_EXCL)");
+    if (repetido != -1) remove_semaforo(repetido);
+
+    remove_segmentos(&s);
+    CONFERE(semget(KEY, NSEMS, 0666) == -1, "depois da remocao, os semaforos nao existem mais");
+    CONFERE(shmget(KEY, TAM_SEG, 0666) == -1, "depois da remocao, o segmento nao existe mais");
+}
+
+static void teste_shm_p_v_tenta_consumir(void) {
+    inicio_teste("p, v e tenta_consumir");
+    int id = cria_semaforo_ack();
+    CONFERE(id != -1, "cria_semaforo_ack cria um semaforo");
+    CONFERE(valor_sem(id, 0) == 0, "o semaforo de ack comeca em 0");
+
+    CONFERE(tenta_consumir(id, 0) == 0, "tenta_consumir com valor 0 devolve 0, sem bloquear");
+    CONFERE(valor_sem(id, 0) == 0, "e nao altera o valor");
+
+    v(id, 0);
+    CONFERE(valor_sem(id, 0) == 1, "v soma 1");
+    CONFERE(tenta_consumir(id, 0) == 1, "tenta_consumir com valor 1 devolve 1");
+    CONFERE(valor_sem(id, 0) == 0, "e subtrai 1");
+
+    v(id, 0);
+    v(id, 0);
+    p(id, 0);
+    CONFERE(valor_sem(id, 0) == 1, "dois v e um p deixam o valor em 1");
+
+    CONFERE(remove_semaforo(id) == 0, "remove_semaforo apaga o semaforo");
+    CONFERE(remove_semaforo(-1) == 0, "remove_semaforo(-1) nao faz nada");
+}
+
+static void teste_shm_indices_validos(void) {
+    inicio_teste("indices_validos (mensagens de erro esperadas)");
+    Fila f;
+    memset(&f, 0, sizeof(f));
+    CONFERE(indices_validos(&f) == 1, "in = 0 e out = 0 sao validos");
+    f.in = MAX_MSGS - 1;
+    f.out = MAX_MSGS - 1;
+    CONFERE(indices_validos(&f) == 1, "in = 100 e out = 100 sao validos");
+    f.in = MAX_MSGS;
+    CONFERE(indices_validos(&f) == 0, "in = 101 e invalido");
+    f.in = 0;
+    f.out = -1;
+    CONFERE(indices_validos(&f) == 0, "out = -1 e invalido");
+}
+
+static void teste_shm_produz_normal(void) {
+    inicio_teste("produz_com_ack normal: 5 mensagens no segmento do produtor 2");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+
+    CONFERE(produz_com_ack(s.sh, QTD_FILAS, 2, 5, -1) == EXIT_SUCCESS, "produz_com_ack devolve sucesso");
+    CONFERE(s.sh[1]->in == 5, "in do segmento 2 avancou para 5");
+    CONFERE(valor_sem(s.semids[1], CHEIO) == 5, "CHEIO = 5");
+    CONFERE(valor_sem(s.semids[1], VAZIO) == MAX_MSGS - 5, "VAZIO = 96");
+    CONFERE(valor_sem(s.semids[1], MUTEX) == 1, "MUTEX voltou a 1");
+    CONFERE(mensagens_no_segmento(&s, 0) == 0 && mensagens_no_segmento(&s, 2) == 0,
+            "os segmentos 1 e 3 nao foram tocados");
+
+    time_t agora = time(NULL);
+    for (int k = 0; k < 5; k++) {
+        Msg m = s.sh[1]->msg[k];
+        CONFERE(m.seq == k + 1, "as mensagens estao em ordem (seq 1, 2, 3...)");
+        CONFERE(m.pid == getpid(), "pid e o do produtor");
+        CONFERE(m.tempo <= agora && m.tempo >= agora - 5, "tempo do envio e o horario atual");
+        CONFERE(s.sh[1]->sem_ack[k] == -1, "sem ack, sem_ack fica -1");
+    }
+    remove_segmentos(&s);
+}
+
+static void teste_shm_produz_striped(void) {
+    inicio_teste("produz_com_ack striped: 7 mensagens em 3 segmentos");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+
+    CONFERE(produz_com_ack(s.sh, QTD_FILAS, 0, 7, -1) == EXIT_SUCCESS, "produz_com_ack devolve sucesso");
+    CONFERE(mensagens_no_segmento(&s, 0) == 3, "segmento 1 recebeu 3 (seq 1, 4, 7)");
+    CONFERE(mensagens_no_segmento(&s, 1) == 2, "segmento 2 recebeu 2 (seq 2, 5)");
+    CONFERE(mensagens_no_segmento(&s, 2) == 2, "segmento 3 recebeu 2 (seq 3, 6)");
+    CONFERE(s.sh[0]->msg[0].seq == 1 && s.sh[0]->msg[1].seq == 4 && s.sh[0]->msg[2].seq == 7,
+            "segmento 1 tem as seq 1, 4 e 7, nessa ordem");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_produz_inexistente(void) {
+    inicio_teste("produz_com_ack com produtor que nao existe (mensagem de erro esperada)");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+
+    CONFERE(produz_com_ack(s.sh, QTD_FILAS, QTD_FILAS + 1, 2, -1) == EXIT_FAILURE,
+            "produtor 4 com 3 segmentos devolve erro");
+    for (int i = 0; i < QTD_FILAS; i++)
+        CONFERE(mensagens_no_segmento(&s, i) == 0, "nenhuma mensagem foi escrita");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_vetor_circular(void) {
+    inicio_teste("vetor circular: enche as 101 vagas, consome e volta ao inicio");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+
+    produz_com_ack(s.sh, QTD_FILAS, 1, MAX_MSGS, -1);
+    CONFERE(valor_sem(s.semids[0], VAZIO) == 0, "com 101 mensagens, VAZIO = 0 (fila cheia)");
+    CONFERE(valor_sem(s.semids[0], CHEIO) == MAX_MSGS, "CHEIO = 101");
+    CONFERE(s.sh[0]->in == 0, "in deu a volta e voltou a 0");
+
+    consome_func(s.sh, QTD_FILAS, 1, 50, 2);
+    CONFERE(s.sh[0]->out == 50, "out avancou para 50");
+
+    produz_com_ack(s.sh, QTD_FILAS, 1, 30, -1);
+    CONFERE(s.sh[0]->in == 30, "in avancou para 30, reaproveitando as vagas liberadas");
+    CONFERE(s.sh[0]->msg[0].seq == 1, "a vaga 0 foi reescrita com a seq 1 do segundo produtor");
+    CONFERE(valor_sem(s.semids[0], CHEIO) == MAX_MSGS - 50 + 30, "CHEIO = 81");
+    CONFERE(s.sh[0]->consumidas == 50, "consumidas = 50");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_produtor_bloqueia_cheio(void) {
+    inicio_teste("produz_com_ack bloqueia com a fila cheia e continua quando abre vaga");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+
+    pid_t pid = cria_filho();
+    if (pid == 0) _exit(produz_com_ack(s.sh, QTD_FILAS, 1, MAX_MSGS + 1, -1));
+    pausa_ms(300);
+    CONFERE(ainda_rodando(pid), "na mensagem 102, o produtor fica bloqueado em P(VAZIO)");
+    CONFERE(valor_sem(s.semids[0], CHEIO) == MAX_MSGS, "a fila esta com as 101 vagas ocupadas");
+
+    consome_func(s.sh, QTD_FILAS, 1, 1, 1);
+    CONFERE(espera_filho(pid, 3) == EXIT_SUCCESS, "com uma vaga livre, o produtor termina");
+    CONFERE(valor_sem(s.semids[0], CHEIO) == MAX_MSGS, "a vaga liberada foi ocupada pela mensagem 102");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_consome_suficiente(void) {
+    inicio_teste("consome_func com mensagens suficientes (ack 2)");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+    produz_com_ack(s.sh, QTD_FILAS, 1, 3, -1);
+
+    consome_func(s.sh, QTD_FILAS, 1, 3, 2);
+    CONFERE(s.sh[0]->out == 3, "out avancou para 3");
+    CONFERE(s.sh[0]->consumidas == 3, "consumidas = 3");
+    CONFERE(valor_sem(s.semids[0], CHEIO) == 0, "CHEIO voltou a 0");
+    CONFERE(valor_sem(s.semids[0], VAZIO) == MAX_MSGS, "VAZIO voltou a 101");
+    CONFERE(valor_sem(s.semids[0], MUTEX) == 1, "MUTEX voltou a 1");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_consome_ack2_insuficiente(void) {
+    inicio_teste("consome_func ack 2 com mensagens de menos (mensagem de erro esperada)");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+    produz_com_ack(s.sh, QTD_FILAS, 1, 2, -1);
+
+    pid_t pid = cria_filho();
+    if (pid == 0) {
+        consome_func(s.sh, QTD_FILAS, 1, 5, 2);
+        _exit(EXIT_SUCCESS);   // so chega aqui se NAO deu o erro esperado
+    }
+    CONFERE(espera_filho(pid, 3) == EXIT_FAILURE, "o consumidor termina com erro, sem bloquear");
+    CONFERE(s.sh[0]->consumidas == 2, "consumiu as 2 que existiam antes do erro (visto pela memoria compartilhada)");
+    CONFERE(valor_sem(s.semids[0], CHEIO) == 0, "CHEIO = 0");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_consome_ack1_bloqueia(void) {
+    inicio_teste("consome_func ack 1 bloqueia com a fila vazia e acorda quando chega mensagem");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+
+    pid_t pid = cria_filho();
+    if (pid == 0) {
+        consome_func(s.sh, QTD_FILAS, 1, 2, 1);
+        _exit(EXIT_SUCCESS);
+    }
+    pausa_ms(200);
+    CONFERE(ainda_rodando(pid), "com a fila vazia, o consumidor fica bloqueado em P(CHEIO)");
+
+    produz_com_ack(s.sh, QTD_FILAS, 1, 1, -1);
+    pausa_ms(200);
+    CONFERE(ainda_rodando(pid), "com 1 de 2 mensagens, continua bloqueado");
+
+    produz_com_ack(s.sh, QTD_FILAS, 1, 1, -1);
+    CONFERE(espera_filho(pid, 3) == EXIT_SUCCESS, "com 2 mensagens, o consumidor termina");
+    CONFERE(s.sh[0]->consumidas == 2, "consumidas = 2");
+    remove_segmentos(&s);
+}
+
+static void teste_shm_ack1_produtor(void) {
+    inicio_teste("produz_com_ack ack 1 espera as confirmacoes (semaforo de ack)");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+    int sem_ack = cria_semaforo_ack();
+
+    pid_t produtor = cria_filho();
+    if (produtor == 0) _exit(produz_com_ack(s.sh, QTD_FILAS, 1, 2, sem_ack));
+    pausa_ms(200);
+    CONFERE(valor_sem(s.semids[0], CHEIO) == 2, "o produtor escreveu as 2 mensagens");
+    CONFERE(s.sh[0]->sem_ack[0] == sem_ack && s.sh[0]->sem_ack[1] == sem_ack,
+            "cada vaga guardou o id do semaforo de ack do produtor");
+    CONFERE(ainda_rodando(produtor), "sem consumo, o produtor fica esperando em P(ack)");
+
+    consome_func(s.sh, QTD_FILAS, 1, 1, 1);
+    pausa_ms(200);
+    CONFERE(ainda_rodando(produtor), "com 1 de 2 confirmacoes, continua esperando");
+
+    consome_func(s.sh, QTD_FILAS, 1, 1, 1);
+    CONFERE(espera_filho(produtor, 3) == EXIT_SUCCESS, "com as 2 confirmacoes, o produtor termina");
+    CONFERE(valor_sem(sem_ack, 0) == 0, "o produtor consumiu as 2 confirmacoes");
+    remove_semaforo(sem_ack);
+    remove_segmentos(&s);
+}
+
+static void teste_shm_ack_produtor_certo(void) {
+    inicio_teste("dois produtores com ack 1 na mesma fila: cada um espera so as suas mensagens");
+    Segmentos s = cria_segmentos();
+    if (!recursos_ok(&s)) { CONFERE(0, "recursos criados"); remove_segmentos(&s); return; }
+    int ack_a = cria_semaforo_ack();
+    int ack_b = cria_semaforo_ack();
+
+    pid_t a = cria_filho();
+    if (a == 0) _exit(produz_com_ack(s.sh, QTD_FILAS, 1, 1, ack_a));
+    pausa_ms(200);
+    pid_t b = cria_filho();
+    if (b == 0) _exit(produz_com_ack(s.sh, QTD_FILAS, 1, 1, ack_b));
+    pausa_ms(200);
+
+    consome_func(s.sh, QTD_FILAS, 1, 1, 1);
+    CONFERE(espera_filho(a, 3) == EXIT_SUCCESS, "a 1a mensagem (de A) libera o produtor A");
+    pausa_ms(200);
+    CONFERE(ainda_rodando(b), "o produtor B continua esperando");
+
+    consome_func(s.sh, QTD_FILAS, 1, 1, 1);
+    CONFERE(espera_filho(b, 3) == EXIT_SUCCESS, "a 2a mensagem (de B) libera o produtor B");
+    remove_semaforo(ack_a);
+    remove_semaforo(ack_b);
+    remove_segmentos(&s);
+}
+
 int main(void) {
-    printf("Testes da troca de mensagens\n\n");
+    printf("=== Memoria compartilhada (paradigma 1)\n\n");
+
+    teste_shm_criacao();
+    teste_shm_p_v_tenta_consumir();
+    teste_shm_indices_validos();
+    teste_shm_produz_normal();
+    teste_shm_produz_striped();
+    teste_shm_produz_inexistente();
+    teste_shm_vetor_circular();
+    teste_shm_produtor_bloqueia_cheio();
+    teste_shm_consome_suficiente();
+    teste_shm_consome_ack2_insuficiente();
+    teste_shm_consome_ack1_bloqueia();
+    teste_shm_ack1_produtor();
+    teste_shm_ack_produtor_certo();
+
+    printf("\n=== Troca de mensagens (paradigma 2)\n\n");
 
     teste_cria_e_remove_fila();
     teste_produz_normal();
