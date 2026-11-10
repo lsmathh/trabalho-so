@@ -92,6 +92,7 @@ int imprime_relatorios(int fila_rel, int qtd_produtores);
 int produz_msg(int filas[], int qtd_produtores, int produtor, int n_msgs, int ack, int fila_ack, int fila_rel);
 void consome_msg(int filas[], int qtd_produtores, int produtor, int n_msgs, int ack, int fila_ack, int fila_rel);
 extern volatile sig_atomic_t consumidas_atual;
+void prepara_termino_shm(MsgRelatorio *rel, int papel, int fila);
 void prepara_termino(int fila_rel, int papel, int fila, struct timeval inicio);
 void envia_relatorio(int fila_rel, int papel, int fila, int consumidas, struct timeval inicio);
 
