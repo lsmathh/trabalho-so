@@ -9,15 +9,87 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/msg.h>
+#include <sys/time.h>
+#include <poll.h>
 
 #include "utils.h"
 
+/* O pai guarda os relatorios ate shutdown, mas esvazia a fila durante a execucao. */
+typedef struct {
+    MsgRelatorio *itens;
+    int quantidade;
+} Relatorios;
+
+static void coleta_relatorios(int fila, Relatorios *r) {
+    MsgRelatorio rel;
+    for (;;) {
+        ssize_t n = msgrcv(fila, &rel, TAM(MsgRelatorio), TIPO_RELATORIO, IPC_NOWAIT);
+        if (n == -1) {
+            if (errno == EINTR) continue;
+            if (errno == ENOMSG) return;
+            perror("msgrcv relatorio");
+            exit(EXIT_FAILURE);
+        }
+        MsgRelatorio *novos = realloc(r->itens, (r->quantidade + 1) * sizeof(*novos));
+        if (novos == NULL) { perror("realloc relatorios"); exit(EXIT_FAILURE); }
+        r->itens = novos;
+        r->itens[r->quantidade++] = rel;
+    }
+}
+
+static void imprime_processo(const MsgRelatorio *rel) {
+    printf("PID[%d] %s: %.3f s\n", rel->pid,
+           rel->papel == PRODUTOR ? "produtor" : "consumidor", rel->segundos);
+}
+
+static int imprime_coletados(const Relatorios *r, int qtd_produtores) {
+    int total = 0, por_fila[MAX_PROD + 1] = {0};
+    for (int i = 0; i < r->quantidade; i++) {
+        const MsgRelatorio *rel = &r->itens[i];
+        imprime_processo(rel);
+        total += rel->consumidas;
+        if (rel->fila >= 1 && rel->fila <= qtd_produtores)
+            por_fila[rel->fila] += rel->consumidas;
+    }
+    for (int i = 1; i <= qtd_produtores; i++)
+        printf("Fila %d: %d mensagens consumidas\n", i, por_fila[i]);
+    return total;
+}
+
+static int le_comando(char *linha, size_t tamanho, int fila_rel, Relatorios *r) {
+    struct pollfd entrada = { .fd = STDIN_FILENO, .events = POLLIN };
+    for (;;) {
+        coleta_relatorios(fila_rel, r);
+        int pronto = poll(&entrada, 1, 50);
+        if (pronto > 0) return fgets(linha, tamanho, stdin) != NULL;
+        if (pronto == -1 && errno != EINTR) { perror("poll stdin"); return 0; }
+    }
+}
+
+static double tempo_decorrido(struct timespec inicio) {
+    struct timespec fim;
+    clock_gettime(CLOCK_MONOTONIC, &fim);
+    return fim.tv_sec - inicio.tv_sec + (fim.tv_nsec - inicio.tv_nsec) / 1e9;
+}
+
+// bloquear antes do fork evita SIGTERM antes do filho instalar seu handler.
+static void bloqueia_termino(sigset_t *anterior) {
+    sigset_t conjunto;
+    sigemptyset(&conjunto);
+    sigaddset(&conjunto, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &conjunto, anterior) == -1) {
+        perror("sigprocmask"); exit(EXIT_FAILURE);
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 3) {
-        fprintf(stderr, "Uso: %s <produtores> <paradigma>\n", argv[0]);
+        fprintf(stderr, "uso: %s <produtores> <paradigma>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
+    setvbuf(stdin, NULL, _IONBF, 0); /* poll deve enxergar todos os comandos */
     int produtores = atoi(argv[1]);
     int paradigma = atoi(argv[2]);
 
@@ -29,7 +101,7 @@ int main(int argc, char *argv[]) {
             troca_mensagem(produtores, paradigma);
             break;
         default:
-            fprintf(stderr, "Erro: paradigma deve ser 1 ou 2\n");
+            fprintf(stderr, "erro: paradigma deve ser 1 ou 2\n");
             return EXIT_FAILURE;
     }
 
@@ -39,10 +111,12 @@ int main(int argc, char *argv[]) {
 void memoria_compartilhada(int qtd_produtores, int paradigma) {
     (void) paradigma;
     if (qtd_produtores < 1 || qtd_produtores > MAX_PROD) {
-        fprintf(stderr, "Erro: quantidade de produtores deve ser de 1 a %d\n", MAX_PROD);
+        fprintf(stderr, "erro: quantidade de produtores deve ser de 1 a %d\n", MAX_PROD);
         exit(EXIT_FAILURE);
     }
 
+    struct timespec inicio_mpmc;
+    clock_gettime(CLOCK_MONOTONIC, &inicio_mpmc);
     Fila *sh[qtd_produtores];
     int shmids[qtd_produtores], semids[qtd_produtores];
     for (int i = 0; i < qtd_produtores; i++) {
@@ -56,7 +130,6 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
         if (semids[i] == -1) { erro = 1; break; }
 
         shmids[i] = cria_segmento(i);
-        printf("Eu sou o i: %d e meu shmid é: %d\n", i, shmids[i]);
         if (shmids[i] == -1) { erro = 1; break; }
 
         sh[i] = anexa_segmento(shmids[i]);
@@ -75,6 +148,7 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
     int produtor, num_msgs, ack;
     pid_t *pids = NULL;
     int *acks = NULL;
+    MsgRelatorio **relatorios = NULL;
     int qtd_filhos = 0;
 
     while (1) {
@@ -99,17 +173,17 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
         }
 
         if (sscanf(linha, "%9s %d %d %d", acao, &produtor, &num_msgs, &ack) != 4) {
-            fprintf(stderr, "Erro: use produz p n_msgs ack, consome p n_msgs ack ou shutdown\n");
+            fprintf(stderr, "erro: use produz p n_msgs ack, consome p n_msgs ack ou shutdown\n");
             continue;
         }
         if (strcmp(acao, "produz") != 0 && strcmp(acao, "consome") != 0) {
-            fprintf(stderr, "Erro: comando '%s' desconhecido\n", acao);
+            fprintf(stderr, "erro: comando '%s' desconhecido\n", acao);
             continue;
         }
         if (produtor < 0 || produtor > qtd_produtores
             || (produtor == 0 && strcmp(acao, "consome") == 0)
             || num_msgs < 1 || num_msgs > 1024 || (ack != 1 && ack != 2)) {
-            fprintf(stderr, "Erro: produtor, quantidade de mensagens ou ack invalidos\n");
+            fprintf(stderr, "erro: produtor, quantidade de mensagens ou ack invalidos\n");
             continue;
         }
 
@@ -128,14 +202,30 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
             if (sem_ack == -1) continue;
         }
 
+        // um registro por filho
+        MsgRelatorio **novos_rel = realloc(relatorios, (qtd_filhos + 1) * sizeof(*relatorios));
+        if (novos_rel == NULL) { perror("realloc relatorios"); remove_semaforo(sem_ack); erro = 1; break; }
+        relatorios = novos_rel;
+        int id_rel = shmget(IPC_PRIVATE, TAM_SEG, IPC_CREAT | 0600);
+        if (id_rel == -1) { perror("shmget relatorio"); remove_semaforo(sem_ack); continue; }
+        MsgRelatorio *rel = shmat(id_rel, NULL, 0);
+        if (shmctl(id_rel, IPC_RMID, NULL) == -1) { perror("shmctl relatorio"); exit(EXIT_FAILURE); }
+        if (rel == (void *) -1) { perror("shmat relatorio"); remove_semaforo(sem_ack); continue; }
+        sigset_t anterior;
+        bloqueia_termino(&anterior);
         fflush(NULL);
         pid_t pid = fork();
         if (pid == -1) {
+            sigprocmask(SIG_SETMASK, &anterior, NULL);
+            shmdt(rel);
             perror("fork");
             remove_semaforo(sem_ack);
             continue;
         }
         if (pid == 0) {
+            int papel = strcmp(acao, "produz") == 0 ? PRODUTOR : CONSUMIDOR;
+            prepara_termino_shm(rel, papel, papel == CONSUMIDOR ? produtor : 0);
+            sigprocmask(SIG_SETMASK, &anterior, NULL);
             if (strcmp(acao, "produz") == 0) {
                 exit(produz_com_ack(sh, qtd_produtores, produtor, num_msgs, sem_ack));
             } else {
@@ -143,6 +233,8 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
                 exit(EXIT_SUCCESS);
             }
         }
+        sigprocmask(SIG_SETMASK, &anterior, NULL);
+        relatorios[qtd_filhos] = rel;
         pids[qtd_filhos] = pid;
         acks[qtd_filhos] = sem_ack;
         qtd_filhos++;
@@ -166,6 +258,16 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
         if (remove_semaforo(acks[i]) == -1) erro = 1;
     }
 
+    for (int i = 0; i < qtd_filhos; i++) {
+        imprime_processo(relatorios[i]);
+        if (shmdt(relatorios[i]) == -1) { perror("shmdt relatorio"); erro = 1; }
+    }
+    free(relatorios);
+    int total = 0;
+    for (int i = 0; i < qtd_produtores; i++) {
+        printf("fila %d: %d mensagens consumidas\n", i + 1, sh[i]->consumidas);
+        total += sh[i]->consumidas;
+    }
     // sem filhos usando as filas, não precisa adquirir os mutexs
     for (int i = 0; i < qtd_produtores; i++) {
         if (remove_segmento(sh[i], shmids[i]) == -1) erro = 1;
@@ -175,14 +277,15 @@ void memoria_compartilhada(int qtd_produtores, int paradigma) {
     free(acks);
     if (erro) exit(EXIT_FAILURE);
 
-    printf("programa finalizado, falta colocar tempo e qtd de consumidas");
+    printf("total de mensagens consumidas: %d\n", total);
+    printf("tempo de operacao do mpmc: %.3f s\n", tempo_decorrido(inicio_mpmc));
 }
 
 // implementado com padrao stripped se produtor for = 0, semaforo de ack fornecido pelo chamador
 int produz_com_ack(Fila *filas[], int qtd_produtores, int produtor,
                     int n_msgs, int sem_ack) {
     if (qtd_produtores < 1 || produtor < 0 || produtor > qtd_produtores) {
-        fprintf(stderr, "Erro: produtor %d nao existe\n", produtor);
+        fprintf(stderr, "erro: produtor %d nao existe\n", produtor);
         return EXIT_FAILURE;
     }
 
@@ -222,7 +325,7 @@ int produz_com_ack(Fila *filas[], int qtd_produtores, int produtor,
 void consome_func(Fila *filas[], int qtd_produtores, int produtor,
                   int n_msgs, int ack) {
     if (produtor < 1 || produtor > qtd_produtores) {
-        fprintf(stderr, "Erro: produtor %d nao existe\n", produtor);
+        fprintf(stderr, "erro: produtor %d nao existe\n", produtor);
         exit(EXIT_FAILURE);
     }
     Fila *fila = filas[produtor - 1];
@@ -231,7 +334,7 @@ void consome_func(Fila *filas[], int qtd_produtores, int produtor,
     for (int i = 0; i < n_msgs; i++) {
         if (ack == 2) {
             if (!tenta_consumir(semid, CHEIO)) {
-                fprintf(stderr, "Erro ao consumir: fila %d sem mensagens disponiveis; "
+                fprintf(stderr, "erro ao consumir: fila %d sem mensagens disponiveis; "
                         "consumidas %d de %d mensagens solicitadas\n", produtor, i, n_msgs);
                 exit(EXIT_FAILURE);
             }
@@ -249,6 +352,7 @@ void consome_func(Fila *filas[], int qtd_produtores, int produtor,
         int destino_ack = fila->sem_ack[fila->out];
         fila->out = (fila->out + 1) % MAX_MSGS;
         fila->consumidas++;
+        consumidas_atual++;
         v(semid, MUTEX);
         v(semid, VAZIO);
 
@@ -285,6 +389,30 @@ int remove_segmento(Fila *fila, int shmid){
         erro = -1;
     }
     return erro;
+}
+
+int cria_fila(void) {
+    int id = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
+    if (id == -1) perror("msgget");
+    return id;
+}
+
+int remove_fila(int id){
+    if (id == -1) return 0;
+    if (msgctl(id, IPC_RMID, NULL) == -1 && errno != EINVAL && errno != EIDRM) {
+        perror("msgctl IPC_RMID");
+        return -1;
+    }
+    return 0;
+
+}
+
+int imprime_relatorios(int fila_rel, int qtd_produtores) {
+    Relatorios r = {0};
+    coleta_relatorios(fila_rel, &r);
+    int total = imprime_coletados(&r, qtd_produtores);
+    free(r.itens);
+    return total;
 }
 
 // obs: utilizar so se tiver o mutex adquirido dentro de consome ou produz
@@ -362,15 +490,306 @@ int busca_semaforo(int produtor){
 }
 
 void troca_mensagem(int qtd_produtores, int paradigma) {
-    (void) qtd_produtores;
     (void) paradigma;
-    printf("Paradigma de troca de mensagens ainda nao implementado\n");
+    struct timespec inicio_mpmc;
+    clock_gettime(CLOCK_MONOTONIC, &inicio_mpmc);
+
+    if(qtd_produtores < 1 || qtd_produtores > MAX_PROD) {
+        fprintf(stderr, "erro: quantidade de produtores deve ser de 1 a %d\n", MAX_PROD);
+        exit(EXIT_FAILURE);
+
+    }
+
+    int filas[qtd_produtores];
+    for (int i =0; i < qtd_produtores; i++) filas[i] = -1;
+    int fila_ack = -1, fila_rel = -1;
+
+    int erro = 0;
+    for (int i = 0; i < qtd_produtores; i++) {
+        filas[i] = cria_fila();
+        if (filas[i] == -1) { erro = 1; break; }
+    }
+    if(!erro) {
+        fila_ack = cria_fila();
+        if (fila_ack == -1) erro = 1;
+    }
+    if(!erro) {
+        fila_rel = cria_fila();
+        if (fila_rel == -1) erro = 1;
+    }
+    if (erro) {
+        for (int i = 0; i < qtd_produtores; i ++) remove_fila(filas[i]);
+        remove_fila(fila_ack);
+        remove_fila(fila_rel);
+        exit(EXIT_FAILURE);
+    }
+
+    char linha[100];
+    char acao[10];
+    int produtor, num_msgs, ack;
+    pid_t *pids = NULL;
+    int qtd_filhos = 0;
+
+    Relatorios relatorios = {0};
+    while(1) {
+        // recolhe os filhos que já terminaram, sem esperar pelos outros
+        pid_t terminado;
+        while((terminado = waitpid(-1, NULL, WNOHANG)) > 0) {
+            for (int i = 0; i < qtd_filhos; i++) {
+                if(pids[i] == terminado) {
+                    pids[i] = -1;
+                    break;
+                }
+            }
+        }
+        printf(">> ");
+        fflush(stdout);
+        if (!le_comando(linha, sizeof(linha), fila_rel, &relatorios)) break;
+    
+        if (sscanf(linha, "%9s", acao) == 1 && strcmp(acao, "shutdown") == 0) {
+            break;
+        }
+    
+        if (sscanf(linha, "%9s %d %d %d", acao, &produtor, &num_msgs, &ack) != 4) {
+            fprintf(stderr, "erro: use produz p n_msgs ack, consome p n_msgs ack ou shutdown\n");
+            continue;
+        }
+        if(strcmp(acao, "produz") != 0 && strcmp(acao, "consome") != 0) {
+            fprintf(stderr, "erro: comando '%s' desconhecido\n", acao);
+            continue;
+        }
+    
+        if(produtor > qtd_produtores) {
+            fprintf(stderr, "erro: fila %d nao existe\n", produtor);
+            continue;
+        }
+    
+        if (produtor < 0 || (produtor == 0 && strcmp(acao, "consome") == 0) || num_msgs < 1 || num_msgs > 1024 || (ack != 1 && ack != 2)) {
+            fprintf(stderr, "erro: produtor, quantidade de mensagens ou ack invalidos\n");
+            continue;
+        }
+    
+        pid_t *novos_pids = realloc(pids, (qtd_filhos + 1) * sizeof(*pids));
+        if (novos_pids == NULL) { perror("realloc pids"); erro = 1; break;}
+        pids = novos_pids;
+    
+        sigset_t anterior;
+        bloqueia_termino(&anterior);
+        fflush(NULL);
+        pid_t pid = fork();
+        if (pid == -1) {
+            sigprocmask(SIG_SETMASK, &anterior, NULL);
+            perror("fork");
+            continue;
+        }
+        if (pid == 0) {
+            struct timeval inicio;
+            gettimeofday(&inicio, NULL);
+            int papel = (strcmp(acao, "produz") == 0) ? PRODUTOR : CONSUMIDOR;
+            prepara_termino(fila_rel, papel, (papel == CONSUMIDOR) ? produtor : 0, inicio);
+            sigprocmask(SIG_SETMASK, &anterior, NULL);
+            if (strcmp(acao, "produz") == 0) {
+                exit(produz_msg(filas, qtd_produtores, produtor, num_msgs, ack, fila_ack, fila_rel));
+            }else {
+                consome_msg(filas, qtd_produtores, produtor, num_msgs, ack, fila_ack, fila_rel);
+                exit(EXIT_SUCCESS);
+            }
+        }
+    
+        sigprocmask(SIG_SETMASK, &anterior, NULL);
+        pids[qtd_filhos] = pid;
+        qtd_filhos++;
+    }
+    // encerra todos antes de esperar, inclusive os bloqueados nas filas
+    for (int i = 0; i < qtd_filhos; i++) {
+        if (pids[i] > 0 && kill(pids[i], SIGTERM) == -1 && errno != ESRCH) {
+            perror("kill");
+            erro = 1;
+        }
+    }
+    for (int i = 0; i < qtd_filhos; i++) {
+        if (pids[i] > 0) {
+            pid_t resultado;
+            do {
+                coleta_relatorios(fila_rel, &relatorios);
+                resultado = waitpid(pids[i], NULL, WNOHANG);
+                if (resultado == 0) poll(NULL, 0, 10);
+            } while (resultado == 0 || (resultado == -1 && errno == EINTR));
+            if (resultado == -1) {perror("waitpid"); erro = 1; }
+        }
+    }
+
+    coleta_relatorios(fila_rel, &relatorios);
+    int total = imprime_coletados(&relatorios, qtd_produtores);
+    free(relatorios.itens);
+    
+    for (int i = 0; i < qtd_produtores; i ++) {
+        if(remove_fila(filas[i]) == -1) erro = 1;
+    }
+
+    if(remove_fila(fila_ack) == -1) erro = 1;
+    if(remove_fila(fila_rel) == -1) erro = 1;
+    free(pids);
+
+    printf("total de mensagens consumidas: %d\n", total);
+    printf("tempo de operacao do mpmc: %.3f s\n", tempo_decorrido(inicio_mpmc));
+
+    if (erro) exit(EXIT_FAILURE);
+
 }
 
-/* TODO completar o que falta do PDF
- * - medir o tempo de cada produtor, consumidor e mpmc e guardar até o shutdown
- * - manter o tempo de quem finalizou antes de shutdown (guardar em array??)
- * - imprimir esse tempo de cada pid, até os encerrados enquanto bloqueados (como capturar do bloqueado?)
- * - imprimir fila->consumidas para cada fila antes de remover os segmentos (ou apenas printo o total acumulado de todas os segs?)
- * - implementar o paradigma 2 com msgget, msgsnd e msgrcv, incluindo a limpeza deles
- */
+int produz_msg(int filas[], int qtd_produtores, int produtor, int n_msgs,
+               int ack, int fila_ack, int fila_rel) {
+    (void) fila_rel;
+
+    if (qtd_produtores < 1 || qtd_produtores > MAX_PROD ||
+        produtor < 0 || produtor > qtd_produtores) {
+        fprintf(stderr, "erro: fila/produtor %d nao existe\n", produtor);
+        return EXIT_FAILURE;
+    }
+
+    if (n_msgs < 1 || n_msgs > 1024 || (ack != 1 && ack != 2)) {
+        fprintf(stderr, "erro: quantidade de mensagens ou ack invalidos\n");
+        return EXIT_FAILURE;
+    }
+
+    if (ack == 1 && fila_ack == -1) {
+        fprintf(stderr, "erro: fila de confirmacoes indisponivel\n");
+        return EXIT_FAILURE;
+    }
+
+    const pid_t pid_produtor = getpid();
+
+    /*
+     * produtor == 0: padrão striped
+     * produtor > 0: todas as mensagens vão pra fila
+     */
+    for (int i = 0; i < n_msgs; i++) {
+        int indice_fila = (produtor == 0)
+                            ? (i % qtd_produtores)
+                            : (produtor - 1);
+
+        if (filas[indice_fila] == -1) {
+            fprintf(stderr, "erro: fila %d indisponivel\n", indice_fila + 1);
+            return EXIT_FAILURE;
+        }
+
+        MsgDados mensagem = {0};
+        mensagem.mtype = TIPO_DADO;
+        mensagem.dados.pid = pid_produtor;
+        mensagem.dados.seq = i + 1;
+        mensagem.dados.tempo = time(NULL);
+        mensagem.pede_ack = (ack == 1);
+
+        int resultado;
+        do {
+            resultado = msgsnd(filas[indice_fila], &mensagem, TAM(MsgDados), 0);
+        } while (resultado == -1 && errno == EINTR);
+
+        if (resultado == -1) {
+            perror("msgsnd dados");
+            return EXIT_FAILURE;
+        }
+    }
+
+    /* ACK=1: todas as mensagens já foram enviadas */
+    if (ack == 1) {
+        int confirmadas[1025] = {0};
+        int total_confirmadas = 0;
+
+        while (total_confirmadas < n_msgs) {
+            MsgAck confirmacao = {0};
+            ssize_t resultado;
+
+            do {
+                resultado = msgrcv(fila_ack, &confirmacao, TAM(MsgAck),
+                                   (long) pid_produtor, 0);
+            } while (resultado == -1 && errno == EINTR);
+
+            if (resultado == -1) {
+                perror("msgrcv ack");
+                return EXIT_FAILURE;
+            }
+
+            if (confirmacao.seq >= 1 && confirmacao.seq <= n_msgs &&
+                !confirmadas[confirmacao.seq]) {
+                confirmadas[confirmacao.seq] = 1;
+                total_confirmadas++;
+            }
+        }
+    }
+
+    return EXIT_SUCCESS;
+}
+
+void consome_msg(int filas[], int qtd_produtores, int produtor, int n_msgs,
+                 int ack, int fila_ack, int fila_rel) {
+    (void) fila_rel;
+
+    if (qtd_produtores < 1 || qtd_produtores > MAX_PROD ||
+        produtor < 1 || produtor > qtd_produtores) {
+        fprintf(stderr, "erro: fila %d nao existe\n", produtor);
+        exit(EXIT_FAILURE);
+    }
+
+    if (n_msgs < 1 || n_msgs > 1024 || (ack != 1 && ack != 2)) {
+        fprintf(stderr, "erro: quantidade de mensagens ou ack invalidos\n");
+        exit(EXIT_FAILURE);
+    }
+
+    int indice_fila = produtor - 1;
+    if (filas[indice_fila] == -1) {
+        fprintf(stderr, "erro: fila %d indisponivel\n", produtor);
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < n_msgs; i++) {
+        MsgDados mensagem = {0};
+        ssize_t resultado;
+
+        /*
+         * ACK=1: msgrcv bloqueia até aparecer uma mensagem
+         * ACK=2: IPC_NOWAIT faz a chamada retornar imediatamente com ENOMSG
+         */
+        int flags = (ack == 2) ? IPC_NOWAIT : 0;
+        do {
+            resultado = msgrcv(filas[indice_fila], &mensagem, TAM(MsgDados),
+                               TIPO_DADO, flags);
+        } while (resultado == -1 && errno == EINTR);
+
+        if (resultado == -1) {
+            if (ack == 2 && errno == ENOMSG) {
+                fprintf(stderr,
+                        "erro ao consumir: fila %d sem mensagens disponiveis; "
+                        "consumidas %d de %d mensagens solicitadas\n",
+                        produtor, i, n_msgs);
+            } else {
+                perror("msgrcv dados");
+            }
+            exit(EXIT_FAILURE);
+        }
+
+        consumidas_atual++;
+
+        if (mensagem.pede_ack) {
+            if (fila_ack == -1 || mensagem.dados.pid <= 0) {
+                fprintf(stderr, "erro: dados invalidos para envio do ACK\n");
+                exit(EXIT_FAILURE);
+            }
+
+            MsgAck confirmacao = {0};
+            confirmacao.mtype = (long) mensagem.dados.pid;
+            confirmacao.seq = mensagem.dados.seq;
+
+            int envio;
+            do {
+                envio = msgsnd(fila_ack, &confirmacao, TAM(MsgAck), 0);
+            } while (envio == -1 && errno == EINTR);
+
+            if (envio == -1) {
+                perror("msgsnd ack");
+                exit(EXIT_FAILURE);
+            }
+        }
+    }
+}

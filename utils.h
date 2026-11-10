@@ -3,6 +3,8 @@
 
 #include <sys/types.h>
 #include <time.h>
+#include  <sys/time.h>
+#include <signal.h>
 
 #define MAX_PROD 10
 #define MAX_MSGS 101 // pra caber em 2048 bytes
@@ -30,6 +32,33 @@ typedef struct{
     time_t duracao;
 } Fila;
 
+#define TIPO_DADO 1
+#define TIPO_RELATORIO 1
+#define PRODUTOR 1 
+#define CONSUMIDOR 2
+
+typedef struct {
+    long mtype;
+    Msg dados;
+    int pede_ack;
+} MsgDados;
+
+typedef struct {
+    long mtype;
+    int seq;
+} MsgAck;
+
+typedef struct {
+    long mtype;
+    pid_t pid;
+    int papel;
+    int fila;
+    int consumidas;
+    double segundos;
+} MsgRelatorio;
+
+#define TAM(tipo) (sizeof(tipo) - sizeof(long))
+
 _Static_assert(sizeof(Fila) <= TAM_SEG,
                "A fila excede os 2048 bytes do segmento compartilhado");
 
@@ -56,5 +85,15 @@ int cria_segmento(int indice);
 Fila *anexa_segmento(int shmid);
 int remove_segmento(Fila *fila, int shmid);
 int indices_validos(const Fila *fila);
+
+int cria_fila(void);
+int remove_fila(int id);
+int imprime_relatorios(int fila_rel, int qtd_produtores);
+int produz_msg(int filas[], int qtd_produtores, int produtor, int n_msgs, int ack, int fila_ack, int fila_rel);
+void consome_msg(int filas[], int qtd_produtores, int produtor, int n_msgs, int ack, int fila_ack, int fila_rel);
+extern volatile sig_atomic_t consumidas_atual;
+void prepara_termino_shm(MsgRelatorio *rel, int papel, int fila);
+void prepara_termino(int fila_rel, int papel, int fila, struct timeval inicio);
+void envia_relatorio(int fila_rel, int papel, int fila, int consumidas, struct timeval inicio);
 
 #endif
